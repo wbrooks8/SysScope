@@ -1,0 +1,1 @@
+/usr/bin/c++ -g -Wl,--dependency-file=CMakeFiles/sysscope.dir/link.d CMakeFiles/sysscope.dir/src/main.cpp.o -o sysscope

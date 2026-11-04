@@ -1,0 +1,3 @@
+/home/kyle/C++/SysScope/build/CMakeFiles/sysscope.dir
+/home/kyle/C++/SysScope/build/CMakeFiles/edit_cache.dir
+/home/kyle/C++/SysScope/build/CMakeFiles/rebuild_cache.dir
