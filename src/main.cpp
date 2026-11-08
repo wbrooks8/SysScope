@@ -1,117 +1,84 @@
-#include <chrono>
-#include <fstream>
-#include <iostream>
-#include <numeric>
-#include <sstream>
-#include <thread>
-#include <vector>
 #include <algorithm>
+#include <chrono>
+#include <iostream>
+#include <thread>
 
-#ifdef _WIN32
-#include <windows.h>
-
-unsigned long long FileTimeToInt64(const FILETIME &ft) {
-    ULARGE_INTEGER li;
-    li.LowPart = ft.dwLowDateTime;
-    li.HighPart = ft.dwHighDateTime;
-    return li.QuadPart;
-}
-#endif
-
-double readCpu() {
 #ifdef __linux__
-    static unsigned long long prevIdle = 0, prevTotal = 0;
-
-    std::ifstream file("/proc/stat");
-    if (!file.is_open()) return -1.0;
-
-    std::string line;
-    std::getline(file, line);
-    std::istringstream iss(line);
-
-    std::string cpuLabel;
-    iss >> cpuLabel; // Skip "cpu" string
-
-    std::vector<long long> values;
-    long long val;
-    while (iss >> val) {
-        values.push_back(val);
-    }
-
-    if (values.size() < 4) return -1.0;
-
-    long long idle = values[3] + (values.size() > 4 ? values[4] : 0); // idle + iowait
-    long long total = std::accumulate(values.begin(), values.end(), 0LL);
-
-    if (prevTotal == 0) {
-        prevIdle = idle;
-        prevTotal = total;
-        return 0.0;
-    }
-
-    unsigned long long deltaTotal = total - prevTotal;
-    unsigned long long deltaIdle = idle - prevIdle;
-
-    prevIdle = idle;
-    prevTotal = total;
-
-    if (deltaTotal == 0) return 0.0;
-
-    double usage = 100.0 * (1.0 - (static_cast<double>(deltaIdle) / static_cast<double>(deltaTotal)));
-    return std::clamp(usage, 0.0, 100.0);
-
+#include <fstream>
+#include <string>
 #elif defined(_WIN32)
-    static FILETIME prevIdle = {0, 0}, prevKernel = {0, 0}, prevUser = {0, 0};
-    FILETIME idle, kernel, user;
-
-    if (!GetSystemTimes(&idle, &kernel, &user)) return -1.0;
-
-    unsigned long long idleTicks = FileTimeToInt64(idle);
-    unsigned long long kernelTicks = FileTimeToInt64(kernel);
-    unsigned long long userTicks = FileTimeToInt64(user);
-
-    unsigned long long prevIdleTicks = FileTimeToInt64(prevIdle);
-    unsigned long long prevKernelTicks = FileTimeToInt64(prevKernel);
-    unsigned long long prevUserTicks = FileTimeToInt64(prevUser);
-
-    unsigned long long totalTicks = kernelTicks + userTicks;
-    unsigned long long prevTotal = prevKernelTicks + prevUserTicks;
-
-    if (prevTotal == 0) {
-        prevIdle = idle;
-        prevKernel = kernel;
-        prevUser = user;
-        return 0.0;
-    }
-
-    unsigned long long deltaTotal = totalTicks - prevTotal;
-    if (deltaTotal == 0) return 0.0;
-
-    unsigned long long deltaIdle = idleTicks - prevIdleTicks;
-
-    prevIdle = idle;
-    prevKernel = kernel;
-    prevUser = user;
-
-    if (deltaIdle > deltaTotal) deltaIdle = deltaTotal;
-
-    double usage = 100.0 * (1.0 - (static_cast<double>(deltaIdle) / static_cast<double>(deltaTotal)));
-    return std::clamp(usage, 0.0, 100.0);
-
+#include <windows.h>
 #else
 #error "Unsupported platform"
 #endif
+
+class CpuMonitor {
+public:
+    // Returns CPU usage in [0, 100] since the previous call, or -1.0 on failure.
+    // The first call primes the baseline and returns 0.0.
+    double sample() {
+        unsigned long long idle = 0;
+        unsigned long long total = 0;
+        if (!readTimes(idle, total)) return -1.0;
+
+        const unsigned long long deltaIdle = idle - prevIdle_;
+        const unsigned long long deltaTotal = total - prevTotal_;
+        const bool first = !primed_;
+
+        prevIdle_ = idle;
+        prevTotal_ = total;
+        primed_ = true;
+
+        if (first || deltaTotal == 0) return 0.0;
+
+        const unsigned long long idleCapped = std::min(deltaIdle, deltaTotal);
+        return 100.0 * (1.0 - static_cast<double>(idleCapped) / static_cast<double>(deltaTotal));
+    }
+
+private:
+    static bool readTimes(unsigned long long &idle, unsigned long long &total);
+
+    unsigned long long prevIdle_ = 0;
+    unsigned long long prevTotal_ = 0;
+    bool primed_ = false;
+};
+
+#ifdef __linux__
+inline bool CpuMonitor::readTimes(unsigned long long &idle, unsigned long long &total) {
+    std::ifstream file("/proc/stat");
+    std::string label;
+    unsigned long long v[8] = {}; // user nice system idle iowait irq softirq steal
+
+    file >> label; // skip "cpu"
+    for (auto &x: v) file >> x;
+    if (!file) return false; // also covers failure to open
+
+    idle = v[3] + v[4]; // idle + iowait
+    total = 0;
+    for (auto x: v) total += x;
+    return true;
 }
 
-int main() {
-    // First call initializes baseline (returns 0.0)
-    readCpu();
+#elif defined(_WIN32)
+inline bool CpuMonitor::readTimes(unsigned long long &idle, unsigned long long &total) {
+    FILETIME idleFt, kernelFt, userFt;
+    if (!GetSystemTimes(&idleFt, &kernelFt, &userFt)) return false;
 
-    // Wait a second to allow a meaningful delta measurement
+    auto toU64 = [](const FILETIME &ft) {
+        return (static_cast<unsigned long long>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    };
+
+    idle = toU64(idleFt);
+    total = toU64(kernelFt) + toU64(userFt);
+    return true;
+}
+#endif
+
+int main() {
+    CpuMonitor cpu;
+    cpu.sample(); // prime the baseline
+
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    // Second call returns actual CPU usage over that interval
-    std::cout << "CPU Usage: " << readCpu() << "%" << std::endl;
-
-    return 0;
+    std::cout << "CPU Usage: " << cpu.sample() << "%\n";
 }
